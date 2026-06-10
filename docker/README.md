@@ -174,6 +174,31 @@ chmod +x dify-env-sync.sh
 ./dify-env-sync.sh
 ```
 
+### Common Management Commands
+
+After deploying Dify, you can use the following commands to manage your services:
+
+```bash
+# Navigate to the docker directory
+cd /home/wsm/codes/dify/docker
+
+# Check service status
+docker compose ps
+
+# View logs (follow mode)
+docker compose logs -f
+
+# Stop services
+docker compose down
+
+# Restart services
+docker compose restart
+
+# View logs for specific services
+docker compose logs -f api
+docker compose logs -f web
+```
+
 ### Additional Information
 
 - **Continuous Improvement Phase**: We are actively seeking feedback from the community to refine and enhance the deployment process. As more users adopt this new method, we will continue to make improvements based on your experiences and suggestions.
