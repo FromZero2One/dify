@@ -10,6 +10,13 @@
 2. [插件安装慢或失败 - 代理配置](#2-插件安装慢或失败---代理配置)
 3. [本地 Ollama / LM Studio 模型连接失败](#3-本地-ollama--lm-studio-模型连接失败)
 4. [常见问题排查](#4-常见问题排查)
+   - [问题 1：容器无法连接代理或 Ollama](#问题-1容器无法连接代理或-ollama)
+   - [问题 2：host.docker.internal 解析失败](#问题-2hostdockerinternal-解析失败)
+   - [问题 3：xray 启动失败](#问题-3xray-启动失败)
+   - [问题 4：Docker 拉取镜像失败](#问题-4docker-拉取镜像失败)
+   - [问题 5：Ollama 找不到模型列表](#问题-5ollama-找不到模型列表)
+   - [问题 6：代理配置后仍然很慢](#问题-6代理配置后仍然很慢)
+   - [问题 7：导入 DSL 时连接插件市场超时](#问题-7导入-dsl-时连接插件市场超时)
 5. [参考命令速查](#5-参考命令速查)
 
 ---
@@ -621,6 +628,120 @@ sudo systemctl restart docker
 
 ---
 
+### 问题 7：导入 DSL 时连接插件市场超时
+
+**症状：**
+在 Dify Web 界面导入 DSL 文件创建应用时失败，API 日志显示：
+```
+httpx.ConnectTimeout: The handshake operation timed out
+Failed to import app
+marketplace.batch_fetch_plugin_manifests(dependencies)
+```
+
+**原因分析：**
+- Dify 在导入 DSL 时需要访问 `https://marketplace.dify.ai` 获取插件依赖信息
+- 虽然已配置代理环境变量，但代理地址使用了错误的 Docker 网络网关 IP
+- 配置的 `172.21.0.1` 与实际网络网关 `172.20.0.1` 不匹配
+
+**排查步骤：**
+
+1. **查看 API 日志确认错误：**
+   ```bash
+   cd /home/wsm/codes/dify/docker
+   docker compose logs --tail 100 api 2>&1 | grep -A 10 -B 5 "ConnectTimeout"
+   ```
+
+2. **检查当前代理配置：**
+   ```bash
+   grep -E "^HTTP_PROXY=|^HTTPS_PROXY=" .env
+   # 输出示例：HTTP_PROXY=http://172.21.0.1:7890
+   ```
+
+3. **获取实际的 Docker 网络网关 IP：**
+   ```bash
+   docker network inspect docker_default | grep Gateway
+   # 输出示例："Gateway": "172.20.0.1"
+   ```
+
+4. **对比发现不一致：**
+   - ❌ 配置文件中：`172.21.0.1`
+   - ✅ 实际网关 IP：`172.20.0.1`
+
+**解决方案：**
+
+```bash
+cd /home/wsm/codes/dify/docker
+
+# 修正代理配置中的网关 IP
+sed -i 's/HTTP_PROXY=http:\/\/172\.21\.0\.1:7890/HTTP_PROXY=http:\/\/172.20.0.1:7890/' .env
+sed -i 's/HTTPS_PROXY=http:\/\/172\.21\.0\.1:7890/HTTPS_PROXY=http:\/\/172.20.0.1:7890/' .env
+
+# 验证修改
+grep -E "^HTTP_PROXY=|^HTTPS_PROXY=" .env
+# 应该输出：
+# HTTP_PROXY=http://172.20.0.1:7890
+# HTTPS_PROXY=http://172.20.0.1:7890
+
+# 重启相关服务以应用新配置
+docker compose restart api worker worker_beat plugin_daemon
+
+# 等待服务启动
+sleep 15
+
+# 验证服务状态
+docker compose ps | grep -E "(api|worker|plugin)"
+```
+
+**验证修复：**
+
+```bash
+# 测试从容器内访问 marketplace
+docker exec docker-api-1 python -c "
+import httpx
+r = httpx.post('https://marketplace.dify.ai/api/v1/plugins/batch', 
+               json={'plugin_ids': []}, 
+               headers={'X-Dify-Version': '1.14.2'}, 
+               timeout=10)
+print(f'Status: {r.status_code}')
+"
+# 预期输出：Status: 400（400 表示连接成功，只是参数不完整）
+
+# 重新尝试导入 DSL 文件
+# 应该在 Dify Web 界面中成功导入
+```
+
+**预防措施：**
+
+1. **定期检查网络配置：**
+   ```bash
+   # 每次重启 Docker 或网络变化后检查
+   docker network inspect docker_default | grep Gateway
+   grep -E "^HTTP_PROXY=|^HTTPS_PROXY=" .env
+   ```
+
+2. **确保配置一致性：**
+   - Docker 网络网关 IP 发生变化时，立即更新 `.env` 文件
+   - 使用脚本自动化检查和更新
+
+3. **监控日志：**
+   ```bash
+   # 实时监控 API 日志中的连接错误
+   docker compose logs -f api 2>&1 | grep -i "timeout\|error"
+   ```
+
+**常见问题：**
+
+- **Q: 为什么网关 IP 会变化？**
+  - A: Docker 网络重建、Docker 重启、或网络配置更改都可能导致网关 IP 变化
+
+- **Q: 如何避免手动修改？**
+  - A: 可以编写脚本自动检测网关 IP 并更新配置文件
+
+- **Q: 其他服务也会受影响吗？**
+  - A: 是的，Ollama、LM Studio 等所有需要访问宿主机服务的配置都需要使用正确的网关 IP
+
+---
+
 ### 问题 6：代理配置后仍然很慢
 
 **排查步骤：**
@@ -822,7 +943,10 @@ docker compose logs -f plugin_daemon
 
 ---
 
-**最后更新时间：** 2026-06-09  
+**最后更新时间：** 2026-06-10  
 **适用版本：** Dify 1.14.2, Ollama latest, LM Studio latest  
 **作者：** AI Assistant  
 **维护者：** Dify 本地部署团队
+
+**更新记录：**
+- 2026-06-10: 添加「问题 7：导入 DSL 时连接插件市场超时」，记录 Docker 网络网关 IP 配置错误的排查和修复过程
